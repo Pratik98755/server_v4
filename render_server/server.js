@@ -15,24 +15,9 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const ytmusic = new YouTubeMusic();
-let ytMusicInitialized = false;
-
+let ytMusicInitialized = true; // ready immediately
 const log = (...args) => console.log(new Date().toISOString(), ...args);
-
-// ======================
-// INIT YT MUSIC
-// ======================
-(async () => {
-  try {
-    log("Initializing YouTube Music API...");
-    await ytmusic.initialize();
-    ytMusicInitialized = true;
-    log("✅ YouTube Music API initialized");
-  } catch (err) {
-    log("❌ Failed to initialize YouTube Music API:", err.message);
-    log("⚠️ Continuing without YouTube Music API — artwork fetching disabled");
-  }
-})();
+log("✅ YouTube Music API ready");
 
 // ======================
 // Helper: Get audio URL using youtube-dl-exec
