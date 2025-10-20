@@ -1,5 +1,5 @@
 // ===============================
-// server.js — Render-ready version
+// server-debug.js — Render-ready DEBUG version
 // ===============================
 
 import express from "express";
@@ -15,14 +15,15 @@ app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const ytmusic = new YouTubeMusic();
-let ytMusicInitialized = true; // ready immediately
+let ytMusicInitialized = true; // assume ready immediately
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 log("✅ YouTube Music API ready");
 
 // ======================
-// Helper: Get audio URL using youtube-dl-exec
+// Helper: Get audio URL using youtube-dl-exec (DEBUG)
 // ======================
 async function getAudioUrl(videoUrl, songName = "") {
+  log(`🔍 getAudioUrl called for "${songName}" -> ${videoUrl}`);
   try {
     const data = await youtubedl(videoUrl, {
       dumpSingleJson: true,
@@ -33,8 +34,12 @@ async function getAudioUrl(videoUrl, songName = "") {
     });
 
     const m4a = data.formats?.find(f => f.ext === "m4a" && f.protocol === "https");
-    if (!m4a) throw new Error("No direct m4a format found");
+    if (!m4a) {
+      log(`⚠️ No m4a format found for "${songName}"`);
+      throw new Error("No direct m4a format found");
+    }
 
+    log(`✅ Found audio URL for "${songName}"`);
     return m4a.url;
   } catch (err) {
     log(`❌ yt-dlp error for "${songName}" (${videoUrl}):`, err.message);
@@ -46,6 +51,7 @@ async function getAudioUrl(videoUrl, songName = "") {
 // HEALTH CHECK
 // ======================
 app.get("/health", (req, res) => {
+  log("GET /health called");
   res.json({
     status: "ok",
     ytMusicInitialized,
@@ -54,7 +60,7 @@ app.get("/health", (req, res) => {
 });
 
 // ======================
-// /songs route
+// /songs route (DEBUG)
 // ======================
 app.post("/songs", async (req, res) => {
   log("POST /songs called with body:", req.body);
@@ -67,7 +73,8 @@ app.post("/songs", async (req, res) => {
   const results = [];
 
   const fetchSong = async (name, index) => {
-    log(`🎵 Fetching: "${name}"`);
+    log(`🎵 [DEBUG] Fetching song #${index + 1}: "${name}"`);
+    const startTime = Date.now();
     try {
       let tracks = [];
 
@@ -75,12 +82,14 @@ app.post("/songs", async (req, res) => {
         try {
           const searchRes = await ytmusic.search(name, "song");
           tracks = searchRes.content || [];
+          log(`🔎 YouTube Music search returned ${tracks.length} results for "${name}"`);
         } catch (err) {
           log(`⚠️ YouTube Music search failed for "${name}":`, err.message);
         }
       }
 
       if (!tracks.length) {
+        log(`⚠️ No tracks found for "${name}" via YouTube Music — using fallback`);
         tracks = [
           { name, artist: { name: "Unknown" }, videoId: null, thumbnails: [] },
         ];
@@ -99,13 +108,13 @@ app.post("/songs", async (req, res) => {
           : `ytsearch:"${name}"`;
 
         try {
-          const audioUrl = await getAudioUrl(youtube_url, name);
-          if (audioUrl) {
-            url = audioUrl;
+          url = await getAudioUrl(youtube_url, name);
+          if (url) {
+            log(`✅ Successfully fetched audio for "${name}" on attempt #${i + 1}`);
             break;
           }
         } catch (err) {
-          log(`⚠️ Attempt ${i + 1} failed for "${name}":`, err.message);
+          log(`⚠️ Attempt #${i + 1} failed for "${name}":`, err.message);
         }
       }
 
@@ -115,6 +124,8 @@ app.post("/songs", async (req, res) => {
             .replace(/\/\d+$/, "/400")
         : "";
 
+      log(`⏱ Finished fetching "${name}" in ${Date.now() - startTime}ms`);
+
       return {
         id: index + 1,
         title: track?.name || name,
@@ -122,9 +133,7 @@ app.post("/songs", async (req, res) => {
         artwork,
         youtube_url:
           youtube_url ||
-          `https://www.youtube.com/results?search_query=${encodeURIComponent(
-            name
-          )}`,
+          `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}`,
         url,
       };
     } catch (err) {
@@ -136,16 +145,16 @@ app.post("/songs", async (req, res) => {
   try {
     const batchSize = 2;
     for (let i = 0; i < songNames.length; i += batchSize) {
+      log(`🔹 Processing batch ${i / batchSize + 1}`);
       const batch = songNames
         .slice(i, i + batchSize)
         .map((name, idx) => fetchSong(name, i + idx));
       const batchResults = await Promise.all(batch);
       results.push(...batchResults.filter(Boolean));
-      if (i + batchSize < songNames.length)
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      if (i + batchSize < songNames.length) await new Promise(r => setTimeout(r, 1000));
     }
 
-    log(`✅ Finished fetching ${results.length} songs`);
+    log(`✅ Finished fetching ${results.length} songs total`);
     res.json(results);
   } catch (err) {
     log("❌ Unexpected error in /songs:", err);
@@ -154,7 +163,7 @@ app.post("/songs", async (req, res) => {
 });
 
 // ======================
-// /yt_link_metadata route
+// /yt_link_metadata route (DEBUG)
 // ======================
 app.post("/yt_link_metadata", async (req, res) => {
   log("POST /yt_link_metadata called with body:", req.body);
@@ -168,7 +177,8 @@ app.post("/yt_link_metadata", async (req, res) => {
 
   const fetchLinkMeta = async (item, index) => {
     const { yt_link, query } = item;
-    log(`Fetching metadata for link: ${yt_link} (query: "${query}")`);
+    log(`🔍 Fetching metadata #${index + 1}: ${yt_link} (query: "${query}")`);
+    const startTime = Date.now();
 
     try {
       const info = await youtubedl(yt_link, {
@@ -197,6 +207,7 @@ app.post("/yt_link_metadata", async (req, res) => {
         }
       }
 
+      log(`⏱ Finished metadata fetch #${index + 1} in ${Date.now() - startTime}ms`);
       return {
         id: index + 1,
         title: info.title || query || "Unknown Title",
@@ -222,16 +233,16 @@ app.post("/yt_link_metadata", async (req, res) => {
   try {
     const batchSize = 2;
     for (let i = 0; i < items.length; i += batchSize) {
+      log(`🔹 Processing metadata batch ${i / batchSize + 1}`);
       const batch = items
         .slice(i, i + batchSize)
         .map((item, idx) => fetchLinkMeta(item, i + idx));
       const batchResults = await Promise.all(batch);
       results.push(...batchResults);
-      if (i + batchSize < items.length)
-        await new Promise(resolve => setTimeout(resolve, 1000));
+      if (i + batchSize < items.length) await new Promise(r => setTimeout(r, 1000));
     }
 
-    log(`✅ Finished fetching metadata for ${results.length} items`);
+    log(`✅ Finished fetching metadata for ${results.length} items total`);
     res.json(results);
   } catch (err) {
     log("❌ Unexpected error in /yt_link_metadata:", err);
@@ -244,5 +255,5 @@ app.post("/yt_link_metadata", async (req, res) => {
 // ======================
 const PORT = process.env.PORT || 5000;
 app.listen(PORT, () => {
-  console.log(`🚀 Server running on http://localhost:${PORT}`);
+  log(`🚀 Server running on http://localhost:${PORT}`);
 });
