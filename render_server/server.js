@@ -15,6 +15,7 @@ const ytmusic = new YouTubeMusic();
 const log = (...args) => console.log(new Date().toISOString(), ...args);
 
 let ytMusicInitialized = false;
+const concurrency = 1;
 
 // Initialize YouTube Music API
 (async () => {
@@ -264,7 +265,7 @@ app.post("/songs", async (req, res) => {
     log(`🎵 Processing ${songNames.length} songs in parallel...`);
 
     // Process songs in parallel with concurrency control
-    const processInBatches = async (items, batchSize = 4, delayBetweenBatches = 500) => {
+    const processInBatches = async (items, batchSize = concurrency, delayBetweenBatches = 500) => {
       const results = [];
       
       for (let i = 0; i < items.length; i += batchSize) {
@@ -305,7 +306,7 @@ app.post("/songs", async (req, res) => {
       return results;
     };
 
-    const results = await processInBatches(songNames, 4, 500);
+    const results = await processInBatches(songNames, concurrency, 500);
     
     // Log summary statistics
     const successful = results.filter(r => r.url && !r.error).length;
