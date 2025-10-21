@@ -1,160 +1,319 @@
-// ===============================
-// server-debug.js — Render-ready DEBUG version
-// ===============================
 
+
+
+// server.js
 import express from "express";
 import cors from "cors";
-import YouTubeMusic from "youtube-music-api";
 import youtubedl from "youtube-dl-exec";
+import YouTubeMusic from "youtube-music-api";
 
-// ======================
-// CONFIG
-// ======================
 const app = express();
 app.use(cors({ origin: "*" }));
 app.use(express.json());
 
 const ytmusic = new YouTubeMusic();
-let ytMusicInitialized = true; // assume ready immediately
 const log = (...args) => console.log(new Date().toISOString(), ...args);
-log("✅ YouTube Music API ready");
+
+let ytMusicInitialized = false;
+
+// Initialize YouTube Music API
+(async () => {
+  try {
+    log("Initializing YouTube Music API...");
+    await ytmusic.initalize();
+    ytMusicInitialized = true;
+    log("✅ YouTube Music API initialized");
+  } catch (err) {
+    log("❌ Failed to initialize YouTube Music API:", err.message);
+    log("⚠️ Continuing without YT Music API — artwork may be missing");
+  }
+})();
 
 // ======================
-// Helper: Get audio URL using youtube-dl-exec (DEBUG)
+// Enhanced Helpers
 // ======================
-async function getAudioUrl(videoUrl, songName = "") {
-  log(`🔍 getAudioUrl called for "${songName}" -> ${videoUrl}`);
+
+// Resolve first YouTube video URL from search
+async function getFirstVideoUrl(query) {
   try {
-    const data = await youtubedl(videoUrl, {
+    const result = await youtubedl(`ytsearch1:${query}`, {
+      getUrl: true,
+      skipDownload: true,
+      noWarnings: true,
+    });
+    return result;
+  } catch (err) {
+    throw new Error("No video found");
+  }
+}
+
+// Enhanced audio URL extraction with multiple fallbacks
+async function getAudioUrl(videoUrl, songName = "") {
+  try {
+    log(`🎵 Extracting audio for: "${songName}"`);
+    
+    const result = await youtubedl(videoUrl, {
       dumpSingleJson: true,
-      format: "bestaudio[ext=m4a]/bestaudio",
-      noCheckCertificates: true,
-      preferFreeFormats: true,
-      addHeader: ["referer:youtube.com", "user-agent:googlebot"],
+      skipDownload: true,
+      noWarnings: true,
     });
 
-    const m4a = data.formats?.find(f => f.ext === "m4a" && f.protocol === "https");
-    if (!m4a) {
-      log(`⚠️ No m4a format found for "${songName}"`);
-      throw new Error("No direct m4a format found");
+    // Get all audio formats
+    const audioFormats = result.formats?.filter(f => 
+      f.acodec && f.acodec !== 'none' && f.url
+    );
+
+    log(`📊 Found ${audioFormats?.length || 0} audio formats for "${songName}"`);
+
+    // Strategy 1: Prefer m4a audio-only
+    let bestFormat = audioFormats?.find(f => 
+      f.ext === 'm4a' && 
+      f.vcodec === 'none' && 
+      f.protocol === 'https'
+    );
+
+    // Strategy 2: Any audio-only format
+    if (!bestFormat) {
+      bestFormat = audioFormats?.find(f => 
+        f.vcodec === 'none' && 
+        f.protocol === 'https'
+      );
     }
 
-    log(`✅ Found audio URL for "${songName}"`);
-    return m4a.url;
+    // Strategy 3: Any audio format with https
+    if (!bestFormat) {
+      bestFormat = audioFormats?.find(f => 
+        f.protocol === 'https' &&
+        f.acodec !== 'none'
+      );
+    }
+
+    // Strategy 4: First available audio format
+    if (!bestFormat) {
+      bestFormat = audioFormats?.[0];
+    }
+
+    if (bestFormat) {
+      log(`✅ Successfully extracted audio for "${songName}": ${bestFormat.ext} format`);
+      return bestFormat.url;
+    }
+
+    throw new Error("No suitable audio format found");
+
   } catch (err) {
-    log(`❌ yt-dlp error for "${songName}" (${videoUrl}):`, err.message);
-    throw new Error("Failed to fetch audio info");
+    log(`❌ Audio extraction failed for "${songName}":`, err.message);
+    
+    // Final fallback attempt with simpler method
+    try {
+      const fallbackUrl = await youtubedl(videoUrl, {
+        format: 'bestaudio[ext=m4a]/bestaudio',
+        getUrl: true,
+        skipDownload: true,
+        noWarnings: true,
+      });
+      
+      if (fallbackUrl) {
+        log(`✅ Fallback method worked for "${songName}"`);
+        return fallbackUrl;
+      }
+    } catch (fallbackErr) {
+      log(`❌ Fallback also failed for "${songName}"`);
+    }
+    
+    throw new Error("All audio extraction methods failed");
+  }
+}
+
+// Get video metadata
+async function getVideoMetadata(videoUrl) {
+  try {
+    const result = await youtubedl(videoUrl, {
+      dumpSingleJson: true,
+      skipDownload: true,
+      noWarnings: true,
+    });
+    
+    return {
+      title: result.title || "Unknown",
+      artist: result.uploader || "Unknown",
+      thumbnail: result.thumbnail || "",
+      duration: result.duration || 0,
+      view_count: result.view_count || 0,
+    };
+  } catch (err) {
+    return {
+      title: "Unknown",
+      artist: "Unknown", 
+      thumbnail: "",
+      duration: 0,
+      view_count: 0,
+    };
   }
 }
 
 // ======================
-// HEALTH CHECK
+// fetchSong function (MUST BE DEFINED)
+// ======================
+const fetchSong = async (name, index) => {
+  try {
+    let track = { name, artist: { name: "Unknown" }, thumbnails: [], videoId: null };
+    let youtube_url = null;
+    let url = null;
+    let metadata = {};
+
+    // Try YT Music API for artwork and videoId
+    if (ytMusicInitialized) {
+      try {
+        const searchRes = await ytmusic.search(name, "song");
+        if (searchRes.content?.length) {
+          track = searchRes.content[0];
+          if (track.videoId) {
+            youtube_url = `https://www.youtube.com/watch?v=${track.videoId}`;
+            log(`🎯 Found YT Music match for "${name}": ${youtube_url}`);
+          }
+        }
+      } catch (err) {
+        log(`⚠️ YT Music search failed for "${name}":`, err.message);
+      }
+    }
+
+    // If no YouTube URL from YT Music, search using yt-dlp
+    if (!youtube_url) {
+      try {
+        youtube_url = await getFirstVideoUrl(name);
+        log(`🔍 YT-DLP found video for "${name}": ${youtube_url}`);
+      } catch (err) {
+        log(`⚠️ Failed to get first video for "${name}":`, err.message);
+      }
+    }
+
+    // Get direct audio URL and metadata
+    if (youtube_url) {
+      try {
+        // Get metadata first
+        metadata = await getVideoMetadata(youtube_url);
+        
+        // Then try to get audio URL
+        url = await getAudioUrl(youtube_url, name);
+      } catch (err) {
+        log(`⚠️ Audio extraction failed for "${name}", but keeping metadata`);
+        // Don't throw - we still have metadata
+      }
+    }
+
+    // Artwork - priority: YT Music > video thumbnail
+    let artwork = "";
+    if (track.thumbnails?.length) {
+      artwork = track.thumbnails[track.thumbnails.length - 1].url
+        .replace(/w\d+-h\d+/, "w400-h400")
+        .replace(/\/\d+$/, "/400");
+    } else if (metadata.thumbnail) {
+      artwork = metadata.thumbnail;
+    }
+
+    // Use metadata title/artist if YT Music didn't provide good data
+    const finalTitle = track.name && track.name !== name ? track.name : (metadata.title || name);
+    const finalArtist = track.artist?.name && track.artist.name !== "Unknown" ? track.artist.name : metadata.artist;
+
+    return {
+      id: index + 1,
+      title: finalTitle,
+      artist: finalArtist,
+      artwork,
+      youtube_url: youtube_url || `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}`,
+      url, // direct audio URL (might be null if extraction failed)
+      duration: metadata.duration,
+      has_audio: !!url,
+      views: metadata.view_count,
+    };
+  } catch (err) {
+    log(`❌ Error processing song "${name}":`, err.message);
+    return { 
+      id: index + 1, 
+      title: name, 
+      artist: "Unknown", 
+      artwork: "", 
+      youtube_url: "", 
+      url: "", 
+      error: true,
+      error_message: err.message
+    };
+  }
+};
+
+// ======================
+// Health Check
 // ======================
 app.get("/health", (req, res) => {
-  log("GET /health called");
-  res.json({
-    status: "ok",
-    ytMusicInitialized,
-    timestamp: new Date().toISOString(),
+  res.json({ 
+    status: "ok", 
+    ytMusicInitialized, 
+    timestamp: new Date().toISOString() 
   });
 });
 
 // ======================
-// /songs route (DEBUG)
+// /songs Route - Parallel Processing
 // ======================
 app.post("/songs", async (req, res) => {
-  log("POST /songs called with body:", req.body);
   const songNames = req.body.songs;
-  if (!songNames || !Array.isArray(songNames)) {
-    log("❌ Invalid songs array");
+  if (!songNames || !Array.isArray(songNames))
     return res.status(400).json({ error: "Missing or invalid songs array" });
-  }
-
-  const results = [];
-
-  const fetchSong = async (name, index) => {
-    log(`🎵 [DEBUG] Fetching song #${index + 1}: "${name}"`);
-    const startTime = Date.now();
-    try {
-      let tracks = [];
-
-      if (ytMusicInitialized) {
-        try {
-          const searchRes = await ytmusic.search(name, "song");
-          tracks = searchRes.content || [];
-          log(`🔎 YouTube Music search returned ${tracks.length} results for "${name}"`);
-        } catch (err) {
-          log(`⚠️ YouTube Music search failed for "${name}":`, err.message);
-        }
-      }
-
-      if (!tracks.length) {
-        log(`⚠️ No tracks found for "${name}" via YouTube Music — using fallback`);
-        tracks = [
-          { name, artist: { name: "Unknown" }, videoId: null, thumbnails: [] },
-        ];
-      }
-
-      let track = null;
-      let url = null;
-      let youtube_url = null;
-
-      for (let i = 0; i < Math.min(3, tracks.length); i++) {
-        track = tracks[i];
-        if (!track) continue;
-
-        youtube_url = track.videoId
-          ? `https://www.youtube.com/watch?v=${track.videoId}`
-          : `ytsearch:"${name}"`;
-
-        try {
-          url = await getAudioUrl(youtube_url, name);
-          if (url) {
-            log(`✅ Successfully fetched audio for "${name}" on attempt #${i + 1}`);
-            break;
-          }
-        } catch (err) {
-          log(`⚠️ Attempt #${i + 1} failed for "${name}":`, err.message);
-        }
-      }
-
-      const artwork = track?.thumbnails?.length
-        ? track.thumbnails[track.thumbnails.length - 1].url
-            .replace(/w\d+-h\d+/, "w400-h400")
-            .replace(/\/\d+$/, "/400")
-        : "";
-
-      log(`⏱ Finished fetching "${name}" in ${Date.now() - startTime}ms`);
-
-      return {
-        id: index + 1,
-        title: track?.name || name,
-        artist: track?.artist?.name || "Unknown",
-        artwork,
-        youtube_url:
-          youtube_url ||
-          `https://www.youtube.com/results?search_query=${encodeURIComponent(name)}`,
-        url,
-      };
-    } catch (err) {
-      log(`❌ Error fetching "${name}":`, err);
-      return null;
-    }
-  };
 
   try {
-    const batchSize = 2;
-    for (let i = 0; i < songNames.length; i += batchSize) {
-      log(`🔹 Processing batch ${i / batchSize + 1}`);
-      const batch = songNames
-        .slice(i, i + batchSize)
-        .map((name, idx) => fetchSong(name, i + idx));
-      const batchResults = await Promise.all(batch);
-      results.push(...batchResults.filter(Boolean));
-      if (i + batchSize < songNames.length) await new Promise(r => setTimeout(r, 1000));
-    }
+    log(`🎵 Processing ${songNames.length} songs in parallel...`);
 
-    log(`✅ Finished fetching ${results.length} songs total`);
+    // Process songs in parallel with concurrency control
+    const processInBatches = async (items, batchSize = 4, delayBetweenBatches = 500) => {
+      const results = [];
+      
+      for (let i = 0; i < items.length; i += batchSize) {
+        const batch = items.slice(i, i + batchSize);
+        log(`🚀 Processing batch ${Math.floor(i/batchSize) + 1}: ${batch.map(s => `"${s}"`).join(', ')}`);
+        
+        const batchPromises = batch.map((name, batchIndex) => 
+          fetchSong(name, i + batchIndex)
+        );
+        
+        const batchResults = await Promise.allSettled(batchPromises);
+        
+        // Extract successful results and log errors
+        batchResults.forEach((result, index) => {
+          if (result.status === 'fulfilled') {
+            results.push(result.value);
+          } else {
+            log(`❌ Failed to process "${batch[index]}":`, result.reason);
+            results.push({
+              id: i + index + 1,
+              title: batch[index],
+              artist: "Unknown",
+              artwork: "",
+              youtube_url: "",
+              url: "",
+              error: true,
+              error_message: result.reason?.message || "Unknown error"
+            });
+          }
+        });
+        
+        // Add delay between batches but not after the last batch
+        if (i + batchSize < items.length) {
+          await new Promise(resolve => setTimeout(resolve, delayBetweenBatches));
+        }
+      }
+      
+      return results;
+    };
+
+    const results = await processInBatches(songNames, 4, 500);
+    
+    // Log summary statistics
+    const successful = results.filter(r => r.url && !r.error).length;
+    const withYoutube = results.filter(r => r.youtube_url && !r.error).length;
+    const failed = results.filter(r => r.error).length;
+    
+    log(`📈 Final Summary: ${results.length} total, ${successful} with audio, ${withYoutube} with YouTube links, ${failed} failed`);
+    
     res.json(results);
   } catch (err) {
     log("❌ Unexpected error in /songs:", err);
@@ -163,36 +322,31 @@ app.post("/songs", async (req, res) => {
 });
 
 // ======================
-// /yt_link_metadata route (DEBUG)
+// /yt_link_metadata Route - Enhanced
 // ======================
 app.post("/yt_link_metadata", async (req, res) => {
-  log("POST /yt_link_metadata called with body:", req.body);
   const items = req.body.items;
-  if (!items || !Array.isArray(items)) {
-    log("❌ Invalid items array");
+  if (!items || !Array.isArray(items)) 
     return res.status(400).json({ error: "Missing or invalid items array" });
-  }
 
   const results = [];
 
   const fetchLinkMeta = async (item, index) => {
     const { yt_link, query } = item;
-    log(`🔍 Fetching metadata #${index + 1}: ${yt_link} (query: "${query}")`);
-    const startTime = Date.now();
-
     try {
-      const info = await youtubedl(yt_link, {
-        dumpSingleJson: true,
-        format: "bestaudio[ext=m4a]/bestaudio",
-        noCheckCertificates: true,
-      });
+      log(`🔗 Processing YouTube link: ${yt_link}`);
 
-      const m4a = info.formats?.find(f => f.ext === "m4a" && f.protocol === "https");
-      const url = m4a?.url || info.url;
-      if (!url) throw new Error("No playable URL found");
+      // Get video metadata and audio URL in parallel
+      const [metadata, audioUrl] = await Promise.all([
+        getVideoMetadata(yt_link),
+        getAudioUrl(yt_link, query || "Unknown").catch(err => {
+          log(`⚠️ Audio extraction failed for link, but continuing with metadata`);
+          return null; // Return null instead of throwing
+        })
+      ]);
 
-      let artwork = info.thumbnail || "";
-
+      // Artwork via YT Music (optional)
+      let artwork = "";
       if (query && ytMusicInitialized) {
         try {
           const searchRes = await ytmusic.search(query, "song");
@@ -203,46 +357,56 @@ app.post("/yt_link_metadata", async (req, res) => {
               .replace(/\/\d+$/, "/400");
           }
         } catch (err) {
-          log(`⚠️ Failed to fetch artwork for query "${query}":`, err.message);
+          // Silently fail - use thumbnail from video metadata
         }
       }
 
-      log(`⏱ Finished metadata fetch #${index + 1} in ${Date.now() - startTime}ms`);
-      return {
-        id: index + 1,
-        title: info.title || query || "Unknown Title",
-        artist: info.uploader || "Unknown Artist",
-        artwork,
-        youtube_url: yt_link,
-        url,
+      // Fallback to video thumbnail
+      if (!artwork && metadata.thumbnail) {
+        artwork = metadata.thumbnail;
+      }
+
+      return { 
+        id: index + 1, 
+        title: metadata.title, 
+        artist: metadata.artist, 
+        artwork, 
+        youtube_url: yt_link, 
+        url: audioUrl, // might be null if extraction failed
+        duration: metadata.duration,
+        has_audio: !!audioUrl,
+        views: metadata.view_count,
       };
     } catch (err) {
-      log(`❌ Error processing ${yt_link}:`, err.message);
-      return {
-        id: index + 1,
-        title: query || "Unknown Title",
-        artist: "Unknown Artist",
-        artwork: "",
-        youtube_url: yt_link,
-        url: "",
+      log(`❌ Error processing YouTube link "${yt_link}":`, err.message);
+      return { 
+        id: index + 1, 
+        title: query || "Unknown", 
+        artist: "Unknown", 
+        artwork: "", 
+        youtube_url: yt_link, 
+        url: "", 
         error: true,
+        error_message: err.message
       };
     }
   };
 
   try {
-    const batchSize = 2;
-    for (let i = 0; i < items.length; i += batchSize) {
-      log(`🔹 Processing metadata batch ${i / batchSize + 1}`);
-      const batch = items
-        .slice(i, i + batchSize)
-        .map((item, idx) => fetchLinkMeta(item, i + idx));
-      const batchResults = await Promise.all(batch);
-      results.push(...batchResults);
-      if (i + batchSize < items.length) await new Promise(r => setTimeout(r, 1000));
+    // Process sequentially for better reliability
+    for (let i = 0; i < items.length; i++) {
+      log(`🔗 Processing link ${i + 1}/${items.length}`);
+      const result = await fetchLinkMeta(items[i], i);
+      results.push(result);
+      
+      if (i < items.length - 1) {
+        await new Promise(resolve => setTimeout(resolve, 800));
+      }
     }
-
-    log(`✅ Finished fetching metadata for ${results.length} items total`);
+    
+    const successful = results.filter(r => r.url).length;
+    log(`📈 Link processing: ${results.length} total, ${successful} with audio URLs`);
+    
     res.json(results);
   } catch (err) {
     log("❌ Unexpected error in /yt_link_metadata:", err);
@@ -251,9 +415,47 @@ app.post("/yt_link_metadata", async (req, res) => {
 });
 
 // ======================
-// START SERVER
+// New Route: /extract-audio (for direct YouTube URL extraction)
+// ======================
+app.post("/extract-audio", async (req, res) => {
+  const { youtube_url, song_name = "Unknown" } = req.body;
+  
+  if (!youtube_url) {
+    return res.status(400).json({ error: "Missing youtube_url" });
+  }
+
+  try {
+    log(`🎵 Direct audio extraction request: ${youtube_url}`);
+    
+    const [audioUrl, metadata] = await Promise.all([
+      getAudioUrl(youtube_url, song_name),
+      getVideoMetadata(youtube_url)
+    ]);
+
+    res.json({
+      success: true,
+      title: metadata.title,
+      artist: metadata.artist,
+      thumbnail: metadata.thumbnail,
+      duration: metadata.duration,
+      audio_url: audioUrl,
+      youtube_url: youtube_url,
+      views: metadata.view_count,
+    });
+
+  } catch (err) {
+    log(`❌ Direct audio extraction failed:`, err.message);
+    res.status(500).json({
+      success: false,
+      error: "Failed to extract audio",
+      error_message: err.message,
+      youtube_url: youtube_url
+    });
+  }
+});
+
+// ======================
+// Start Server
 // ======================
 const PORT = process.env.PORT || 5000;
-app.listen(PORT, () => {
-  log(`🚀 Server running on http://localhost:${PORT}`);
-});
+app.listen(PORT, () => log(`🚀 Server running on http://localhost:${PORT}`));
